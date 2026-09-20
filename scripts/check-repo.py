@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Проверяет каркас репозитория, не изменяя его. Python 3.9+, без зависимостей.
+"""Проверяет каркас и напоминает об одноразовых инструкциях, не изменяя файлы.
+Python 3.9+, без зависимостей.
 
 Не проверяет продукт, внешние ссылки, Markdown-якоря или содержимое records/.
 Поддерживает простые Markdown-ссылки [текст](путь) без пробелов в пути.
@@ -23,6 +24,7 @@ REQUIRED_FILES = (
 )
 LINK = re.compile(r"!?\[[^\]\n]*\]\(([^\s()]+)\)")
 FIELD = re.compile(r"\{\{[A-Z_]+\}\}")
+REMOVE_TAG = "remove_after_instruction_complete"
 
 
 class Audit:
@@ -70,9 +72,11 @@ class Audit:
             self.errors.append(f"{label}: отсутствует завершающий перевод строки.")
         return text
 
-    def check_links(self, path: Path, text: str) -> None:
-        # Проверяются ссылки вне блоков кода; якоря намеренно не проверяются.
+    def check_markdown(self, path: Path, text: str) -> None:
+        # AICODE-NOTE: теги распознаются на отдельных строках вне блоков кода,
+        # чтобы примеры разметки не создавали ложные напоминания после очистки.
         fence = ""
+        open_blocks: List[int] = []
         for number, line in enumerate(text.splitlines(), 1):
             marker = re.match(r"^\s*(`{3,}|~{3,})", line)
             if marker:
@@ -84,8 +88,21 @@ class Audit:
                 continue
             if fence:
                 continue
+            label = f"{path.relative_to(ROOT).as_posix()}:{number}"
+            if line.strip() == f"<{REMOVE_TAG}>":
+                if open_blocks:
+                    self.errors.append(f"{label}: блоки <{REMOVE_TAG}> нельзя вкладывать друг в друга.")
+                open_blocks.append(number)
+                self.warnings.append(
+                    f"{label}: выполните инструкции блока <{REMOVE_TAG}>; "
+                    "после выполнения сохраните результат вне блока и удалите блок вместе с тегами."
+                )
+            elif line.strip() == f"</{REMOVE_TAG}>":
+                if open_blocks:
+                    open_blocks.pop()
+                else:
+                    self.errors.append(f"{label}: закрывающий тег </{REMOVE_TAG}> без открывающего.")
             for match in LINK.finditer(line):
-                label = f"{path.relative_to(ROOT).as_posix()}:{number}"
                 target = match.group(1).strip("<>")
                 try:
                     url = urlsplit(target)
@@ -96,6 +113,9 @@ class Audit:
                         self.errors.append(f"{label}: локальная ссылка ведёт в отсутствующий путь.")
                 except (OSError, ValueError):
                     self.errors.append(f"{label}: некорректная локальная ссылка.")
+        for number in open_blocks:
+            label = f"{path.relative_to(ROOT).as_posix()}:{number}"
+            self.errors.append(f"{label}: блок <{REMOVE_TAG}> не закрыт.")
 
     def scan_docs(self) -> List[Path]:
         result: List[Path] = []
@@ -137,7 +157,7 @@ class Audit:
             if text is None:
                 continue
             self.documents += 1
-            self.check_links(path, text)
+            self.check_markdown(path, text)
             if path.name == "AGENTS.md" and path.parent == ROOT:
                 if FIELD.search(text):
                     self.warnings.append("AGENTS.md: заполните название и назначение проекта.")
